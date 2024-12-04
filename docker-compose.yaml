@@ -1,0 +1,270 @@
+version: "3.8"
+
+services:
+  spring-app:
+    container_name: spring-app
+    hostname: spring-app
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USERNAME=user
+      - DB_PASSWORD=1111
+    depends_on:
+      - postgres
+    networks:
+      backend:
+        ipv4_address: 192.168.60.3
+
+  postgres:
+    image: postgres:16
+    container_name: postgres
+    hostname: postgres
+    command:
+      [
+        "postgres",
+        "-c",
+        "logging_collector=on",
+        "-c",
+        "log_directory=/var/log/postgresql",
+        "-c",
+        "log_filename=postgresql.log",
+        "-c",
+        "log_statement=all",
+      ]
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: 1111
+    networks:
+      backend:
+        ipv4_address: 192.168.60.4
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - postgres_logs:/var/log/postgresql
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter
+    container_name: postgres-exporter
+    hostname: postgres-exporter
+    environment:
+      DATA_SOURCE_NAME: "postgresql://user:1111@postgres:5432/items?sslmode=disable"
+    links:
+      - postgres
+      - prometheus
+    networks:
+      backend:
+        ipv4_address: 192.168.60.2
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: prometheus
+    hostname: prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+    environment:
+      TZ: "Europe/Moscow"
+    ports:
+      - "9090:9090"
+    networks:
+      backend:
+        ipv4_address: 192.168.60.5
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: grafana
+    hostname: grafana
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    volumes:
+      - grafana_data:/var/lib/grafana
+    environment:
+      GF_INSTALL_PLUGINS: "grafana-clock-panel,grafana-simple-json-datasource,grafana-worldmap-panel,grafana-piechart-panel"
+      TZ: "Europe/Moscow"
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    networks:
+      backend:
+        ipv4_address: 192.168.60.6
+
+  adminer:
+    image: adminer
+    container_name: adminer
+    hostname: adminer
+    ports:
+      - 8081:8080
+    depends_on:
+      - postgres
+    networks:
+      backend:
+        ipv4_address: 192.168.60.7
+
+  graylog:
+    hostname: graylog
+    container_name: graylog
+    image: graylog/graylog:6.0.6
+    entrypoint: "/usr/bin/tini -- wait-for-it elasticsearch:9200 -- /docker-entrypoint.sh"
+    environment:
+      - GRAYLOG_HTTP_BIND_ADDRESS=192.168.60.8:9000
+      - GRAYLOG_ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - GRAYLOG_MONGODB_URI=mongodb://mongodb:27017/graylog
+      - GRAYLOG_REPORT_DISABLE_SANDBOX=true
+      - GRAYLOG_PASSWORD_SECRET=somepasswordpepper
+      - GRAYLOG_ROOT_PASSWORD_SHA2=8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918
+      - GRAYLOG_HTTP_EXTERNAL_URI=http://192.168.60.8:9000/
+      - GRAYLOG_ELASTICSEARCH_CLUSTER_NAME=graylog
+      - TZ=Europe/Moscow
+      - GRAYLOG_TIMEZONE=Europe/Moscow
+    depends_on:
+      mongodb:
+        condition: service_started
+      elasticsearch:
+        condition: service_started
+    networks:
+      backend:
+        ipv4_address: 192.168.60.8
+    ports:
+      - 9000:9000
+      - 1514:1514
+      - 1514:1514/udp
+      - 12201:12201
+      - 12201:12201/udp
+    volumes:
+      - "graylog_data:/usr/share/graylog/data"
+    restart: "on-failure"
+
+  mongodb:
+    image: mongo:8.0.0
+    hostname: mongodb
+    container_name: mongodb
+    volumes:
+      - "mongodb_data:/data/db"
+    restart: "on-failure"
+    networks:
+      backend:
+        ipv4_address: 192.168.60.9
+
+  elasticsearch:
+    image: elasticsearch:7.17.24
+    container_name: elasticsearch
+    hostname: elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    mem_limit: 1g
+    networks:
+      backend:
+        ipv4_address: 192.168.60.10
+    restart: "on-failure"
+
+  zabbix-server:
+    image: zabbix/zabbix-server-pgsql:alpine-7.0-latest
+    container_name: zabbix-server
+    hostname: zabbix-server
+    restart: unless-stopped
+    environment:
+      TZ: "Europe/Moscow"
+      DB_SERVER_HOST: postgres
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: 1111
+      POSTGRES_DB: zabbix
+      ZBX_JAVAGATEWAY_ENABLE: true
+      ZBX_JAVAGATEWAY: zabbix-gateway
+    ports:
+      - "10051:10051"
+    depends_on:
+      - postgres
+    networks:
+      backend:
+        ipv4_address: 192.168.60.11
+
+  zabbix-agent:
+    image: zabbix/zabbix-agent:alpine-7.0-latest
+    hostname: zabbix-agent
+    container_name: zabbix-agent
+    restart: always
+    environment:
+      ZBX_HOSTNAME: spring-app
+      ZBX_SERVER_HOST: zabbix-server
+      ZBX_PASSIVE_ALLOW: "true"
+      ZBX_PASSIVE_ALLOW_FROM: spring-app
+    depends_on:
+      - zabbix-server
+    networks:
+      backend:
+        ipv4_address: 192.168.60.12
+
+  zabbix-gateway:
+    image: zabbix/zabbix-java-gateway:alpine-7.0-latest
+    hostname: zabbix-gateway
+    container_name: zabbix-gateway
+    restart: always
+    networks:
+      backend:
+        ipv4_address: 192.168.60.13
+
+  zabbix-web:
+    image: zabbix/zabbix-web-nginx-pgsql:alpine-7.0-latest
+    container_name: zabbix-web
+    hostname: zabbix-web
+    restart: unless-stopped
+    environment:
+      ZBX_SERVER_HOST: zabbix-server
+      DB_SERVER_HOST: postgres
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: 1111
+    ports:
+      - "443:8443"
+      - "8082:8080"
+    depends_on:
+      - postgres
+    networks:
+      backend:
+        ipv4_address: 192.168.60.14
+
+  filebeat:
+    image: filebeat
+    container_name: filebeat
+    hostname: filebeat
+    volumes:
+      - postgres_logs:/var/log/postgresql
+    depends_on:
+      - graylog
+      - postgres
+    networks:
+      backend:
+        ipv4_address: 192.168.60.15
+
+networks:
+  backend:
+    driver: "bridge"
+    ipam:
+      config:
+        - subnet: "192.168.60.0/24"
+
+volumes:
+  postgres_data:
+  mongodb_data:
+  graylog_data:
+  grafana_data:
+  elasticsearch_data:
+  postgres_logs:
